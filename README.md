@@ -3,8 +3,6 @@
 IaR-Display is a Raspberry Pi kiosk setup for displaying iamresponding using FullPageOS.
 It automatically loads the iamresponding login page, installs a helper Chromium extension, applies a custom splash and background, and configures the system for unattended display use.
 
-This project is intended for personal use and volunteer public safety organizations such as fire and EMS departments.
-
 ## What this project does
 
 Once FullPageOS is installed, the provided provisioning script will:
