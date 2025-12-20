@@ -1,0 +1,36 @@
+{
+    "name": "IaR Helper",
+    "version": "1.0",
+    "description": "Automates login for iamresponding.com and refreshes the dashboard daily at 3 AM.",
+    "manifest_version": 3,
+  
+    "permissions": ["alarms", "scripting", "tabs"],
+    "host_permissions": [
+      "*://auth.iamresponding.com/*",
+      "*://dashboard.iamresponding.com/*"
+    ],
+    
+    "web_accessible_resources": [
+      {
+        "resources": ["credentials.json"],
+        "matches": ["<all_urls>"]
+      }
+    ],
+    
+    "background": {
+      "service_worker": "background.js"
+    },
+    "content_scripts": [
+      {
+        "matches": ["*://auth.iamresponding.com/login/member*"],
+        "js": ["contentScriptLogin.js"],
+        "run_at": "document_idle"
+      },
+      {
+        "matches": ["*://dashboard.iamresponding.com/*"],
+        "js": ["contentScriptDashboard.js"],
+        "run_at": "document_idle"
+      }
+    ]
+  }
+  
