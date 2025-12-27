@@ -31,8 +31,6 @@ init_logging() {
 }
 
 run_cmd() {
-  # Runs a command and captures all output to the logfile.
-  # Only formatted script messages go to the console.
   {
     printf '\n[%s] $ ' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf '%q ' "$@"
@@ -85,7 +83,6 @@ prompt() {
 }
 
 prompt_secret_confirmed() {
-  # Masked input, requires confirmation. Stores in the variable name passed as $1.
   local __var="$1"
   local __msg="$2"
   local p1=""
@@ -129,7 +126,6 @@ boot_root() {
 }
 
 system_update() {
-  # No package installs. This matches the manual instruction "sudo apt update".
   if command -v apt-get >/dev/null 2>&1; then
     log "Running system update: apt-get update"
     run_cmd_allow_fail apt-get update -y
@@ -168,7 +164,6 @@ append_cmdline_flags() {
   local current
   current="$(cat "$cmd")"
 
-  # Keep cmdline.txt as one line, append any missing flags
   for f in logo.nologo consoleblank=0 loglevel=0 quiet splash; do
     if [[ "$current" != *"$f"* ]]; then
       current="${current} ${f}"
@@ -194,7 +189,6 @@ maybe_install_splash() {
   log "Replacing boot splash image at ${dst_splash}..."
   run_cmd cp -f "$src" "$dst_splash"
 
-  # FullPageOS uses /opt/custompios/background.png as the desktop background.
   if [[ -d /opt/custompios ]]; then
     log "Replacing FullPageOS desktop background at /opt/custompios/background.png..."
     run_cmd cp -f "$src" /opt/custompios/background.png
@@ -205,6 +199,24 @@ maybe_install_splash() {
   else
     log "/opt/custompios not found, skipping desktop background replacement."
   fi
+}
+
+disable_chromium_password_save_popup() {
+  local policy_dir="/etc/chromium/policies/managed"
+  local policy_file="${policy_dir}/iar-display-policy.json"
+
+  log "Disabling Chromium password save prompts via managed policy..."
+  mkdir -p "$policy_dir"
+
+  cat > "$policy_file" <<'EOF'
+{
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false
+}
+EOF
+
+  chmod 644 "$policy_file"
 }
 
 disable_screen_blanking() {
@@ -238,7 +250,6 @@ systemctl_try_restart() {
 }
 
 ensure_vnc_disabled() {
-  # Best-effort disable across Pi OS variants.
   if command -v raspi-config >/dev/null 2>&1; then
     log "Disabling VNC via raspi-config..."
     run_cmd_allow_fail raspi-config nonint do_vnc 1
@@ -484,6 +495,8 @@ main() {
   if ! install_chromium_wrapper "$pi_user"; then
     err "Auto-load setup failed. You may need to load the extension manually once."
   fi
+
+  disable_chromium_password_save_popup
 
   # Step 3: VNC setup
   log "Step: Remote access (VNC)"
