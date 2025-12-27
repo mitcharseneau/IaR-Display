@@ -2,9 +2,11 @@
 
 ## Overview
 
-This document describes how to install and configure FullPageOS on a Raspberry Pi for use with iamresponding, including automatic page loading and installation of the IaR Helper Chromium extension.
+This document describes how to manually install and configure a Raspberry Pi running FullPageOS for use with iamresponding.
 
-These are the manual installation steps. This document does not use the provisioning script.
+These steps replicate everything performed by the automated provisioning script, including kiosk configuration, extension loading, credential handling, VNC configuration, splash and background setup, and Chromium policy changes.
+
+No part of this document relies on the provisioning script.
 
 ## Prerequisites
 
@@ -18,7 +20,7 @@ These are the manual installation steps. This document does not use the provisio
 
 - Raspberry Pi Imager
 - SSH access to the Raspberry Pi
-- Optional: VNC client
+- Optional: VNC client if remote access is desired
 
 ## Install FullPageOS
 
@@ -34,17 +36,18 @@ FullPageOS must be installed before completing the steps below.
    - FullPageOS
    - FullPageOS (Stable)
 4. Select your SD card
-5. When prompted for user configuration, set the username to: `iar`
+5. When prompted for user configuration, set the username to: ```iar```
 6. Write the image to the SD card
 
 ### Option 2: Manual download
 
-1. Download FullPageOS from: <https://unofficialpi.org/Distros/FullPageOS/>
+1. Download FullPageOS from:
+   <https://unofficialpi.org/Distros/FullPageOS/>
 2. Open Raspberry Pi Imager
 3. Select Use custom
 4. Choose the downloaded image
 5. Write the image to the SD card
-6. Set the username to: `iar`
+6. Set the username to: ```iar```
 
 ## Configure the FullPageOS boot partition
 
@@ -52,7 +55,7 @@ After imaging completes, remove and reinsert the SD card so it mounts on your co
 
 ### Set the kiosk URL
 
-Open `fullpageos.txt` on the boot partition and replace the contents with:
+Open `fullpageos.txt` on the boot partition and replace its contents with:
 
 ```text
 https://auth.iamresponding.com
@@ -60,7 +63,7 @@ https://auth.iamresponding.com
 
 ### Update kernel cmdline flags
 
-Open `cmdline.txt` on the boot partition and append the following to the end of the existing line:
+Open `cmdline.txt` on the boot partition and append the following flags to the end of the existing line:
 
 ```text
 logo.nologo consoleblank=0 loglevel=0 quiet splash
@@ -73,7 +76,7 @@ Keep `cmdline.txt` as a single line.
 Replace `splash.png` on the boot partition with your department themed image.
 Keep the same filename.
 
-## First boot and SSH
+## First boot and SSH access
 
 1. Insert the SD card into the Raspberry Pi
 2. Power on the device
@@ -92,9 +95,9 @@ Run:
 sudo apt update
 ```
 
-## Enable VNC and disable screen blanking
+## Disable screen blanking
 
-Run:
+Disable display blanking so the kiosk remains visible.
 
 ```bash
 sudo raspi-config
@@ -102,23 +105,76 @@ sudo raspi-config
 
 Then set:
 
-- Interface Options
-  - VNC
-    - Enable
 - Display Options
   - Screen Blanking
     - Off
 
 Exit and reboot if prompted.
 
-## Install the extension folder
+## Optional: Configure VNC
 
-### Copy the extension to the Raspberry Pi
+You may either enable VNC with a custom port and password or ensure it is fully disabled.
+
+### Enable VNC
+
+1. Enable VNC:
+
+```bash
+sudo raspi-config
+```
+
+Navigate to:
+
+- Interface Options
+  - VNC
+    - Enable
+
+2. Configure the VNC port and authentication.
+
+Create or edit the RealVNC configuration file:
+
+```bash
+sudo mkdir -p /etc/vnc/config.d
+sudo nano /etc/vnc/config.d/vncserver-x11
+```
+
+Add or ensure the following entries exist:
+
+```text
+Authentication=VncAuth
+RfbPort=5900
+```
+
+3. Set the VNC service password:
+
+```bash
+vncpasswd -service
+```
+
+4. Restart the VNC service:
+
+```bash
+sudo systemctl restart vncserver-x11-serviced.service
+```
+
+### Disable VNC completely
+
+If you do not want VNC enabled:
+
+```bash
+sudo raspi-config nonint do_vnc 1
+sudo systemctl disable --now vncserver-x11-serviced.service 2>/dev/null || true
+sudo systemctl disable --now wayvnc.service 2>/dev/null || true
+```
+
+## Install the IaR Helper Chromium extension
+
+### Copy the extension directory
 
 From your local machine, copy the extension folder to the Raspberry Pi:
 
 ```bash
-scp -r "/path/to/extension" iar@<raspberry_pi_ip>:/home/iar/extension
+scp -r /path/to/extension iar@<raspberry_pi_ip>:/home/iar/extension
 ```
 
 Ensure the extension directory is owned by the `iar` user:
@@ -146,21 +202,13 @@ chmod 600 /home/iar/extension/credentials.json
 
 ## Auto load the extension by wrapping Chromium
 
-FullPageOS launches Chromium in kiosk mode, but loading an unpacked extension normally requires manual steps.
-
-To make the extension load automatically, replace the Chromium launcher with a wrapper script that injects the extension flags.
-
 ### Determine which Chromium binary exists
-
-Check for these files:
 
 ```bash
 ls -l /usr/bin/chromium-browser /usr/bin/chromium 2>/dev/null
 ```
 
 ### Wrap chromium-browser (if it exists)
-
-If `/usr/bin/chromium-browser` exists, run:
 
 ```bash
 sudo mv /usr/bin/chromium-browser /usr/bin/chromium-browser.real
@@ -171,14 +219,15 @@ set -euo pipefail
 
 EXT_DIR="/home/iar/extension"
 
-exec /usr/bin/chromium-browser.real   --disable-extensions-except="${EXT_DIR}"   --load-extension="${EXT_DIR}"   "$@"
+exec /usr/bin/chromium-browser.real \
+  --disable-extensions-except="${EXT_DIR}" \
+  --load-extension="${EXT_DIR}" \
+  "$@"
 EOF
 sudo chmod 755 /usr/bin/chromium-browser
 ```
 
 ### Wrap chromium (if it exists)
-
-If `/usr/bin/chromium` exists, run:
 
 ```bash
 sudo mv /usr/bin/chromium /usr/bin/chromium.real
@@ -189,20 +238,38 @@ set -euo pipefail
 
 EXT_DIR="/home/iar/extension"
 
-exec /usr/bin/chromium.real   --disable-extensions-except="${EXT_DIR}"   --load-extension="${EXT_DIR}"   "$@"
+exec /usr/bin/chromium.real \
+  --disable-extensions-except="${EXT_DIR}" \
+  --load-extension="${EXT_DIR}" \
+  "$@"
 EOF
 sudo chmod 755 /usr/bin/chromium
 ```
 
-## Make the desktop background match the boot splash
+## Disable Chromium password save and autofill prompts
 
-FullPageOS can briefly show the desktop before Chromium fully launches.
-To make that transition seamless, copy the same image used for `splash.png` into the FullPageOS background path.
-
-Copy your splash image to:
+Create a managed Chromium policy:
 
 ```bash
-sudo cp /boot/firmware/splash.png /opt/custompios/background.png 2>/dev/null || sudo cp /boot/splash.png /opt/custompios/background.png
+sudo mkdir -p /etc/chromium/policies/managed
+sudo nano /etc/chromium/policies/managed/iar-display-policy.json
+```
+
+Add the following:
+
+```json
+{
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false
+}
+```
+
+## Match desktop background to boot splash
+
+```bash
+sudo cp /boot/firmware/splash.png /opt/custompios/background.png 2>/dev/null || \
+sudo cp /boot/splash.png /opt/custompios/background.png
 ```
 
 If `feh` is available, apply it immediately:
@@ -212,8 +279,6 @@ command -v feh >/dev/null 2>&1 && feh --bg-center /opt/custompios/background.png
 ```
 
 ## Reboot
-
-Reboot to apply changes:
 
 ```bash
 sudo reboot
@@ -227,4 +292,5 @@ After reboot, verify:
 - The desktop background matches the splash during startup
 - Chromium launches in kiosk mode
 - The IaR Helper extension is loaded automatically
+- Chromium does not prompt to save passwords
 - The iamresponding login page is displayed
