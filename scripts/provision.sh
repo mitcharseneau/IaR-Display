@@ -240,7 +240,7 @@ systemctl_try_restart() {
 ensure_vnc_disabled() {
   # Best-effort disable across Pi OS variants.
   if command -v raspi-config >/dev/null 2>&1; then
-    log "Disabling VNC via raspi-config (best effort)..."
+    log "Disabling VNC via raspi-config..."
     run_cmd_allow_fail raspi-config nonint do_vnc 1
   else
     log "raspi-config not found, cannot toggle VNC via raspi-config."
@@ -296,7 +296,7 @@ configure_vnc_step() {
     exit 1
   fi
 
-  log "Enabling VNC via raspi-config..."
+  log "Enabling VNC via raspi-config. This may take a while..."
   run_cmd_allow_fail raspi-config nonint do_vnc 0
 
   if command -v vncpasswd >/dev/null 2>&1; then
