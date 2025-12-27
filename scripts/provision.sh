@@ -4,6 +4,7 @@ set -euo pipefail
 PI_USER_DEFAULT="iar"
 WORKDIR_DEFAULT="/opt/iar-display"
 TARGET_URL_DEFAULT="https://auth.iamresponding.com"
+VNC_PORT_DEFAULT="5900"
 
 log() { printf '%s\n' "[provision] $*"; }
 err() { printf '%s\n' "[provision][error] $*" >&2; }
@@ -142,23 +143,159 @@ maybe_install_splash() {
   fi
 }
 
-enable_vnc_and_disable_blanking() {
-  local enable_vnc="$1"
-
+disable_screen_blanking() {
   if ! command -v raspi-config >/dev/null 2>&1; then
-    log "raspi-config not found, skipping VNC and screen blanking configuration."
+    log "raspi-config not found, skipping screen blanking configuration."
     return 0
   fi
 
   log "Disabling screen blanking..."
   raspi-config nonint do_blanking 1 || true
+}
 
-  if [[ "${enable_vnc,,}" == "y" ]]; then
-    log "Enabling VNC..."
-    raspi-config nonint do_vnc 0 || true
-  else
-    log "VNC not enabled (you chose no)."
+systemctl_try_disable_now() {
+  local unit="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "${unit}"; then
+      log "Disabling and stopping ${unit}..."
+      systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+    fi
   fi
+}
+
+systemctl_try_restart() {
+  local unit="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "${unit}"; then
+      log "Restarting ${unit}..."
+      systemctl restart "${unit}" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+ensure_vnc_disabled() {
+  # Best-effort disable across Pi OS variants (RealVNC or WayVNC).
+  if command -v raspi-config >/dev/null 2>&1; then
+    log "Disabling VNC via raspi-config (best effort)..."
+    raspi-config nonint do_vnc 1 >/dev/null 2>&1 || true
+  else
+    log "raspi-config not found, cannot toggle VNC via raspi-config."
+  fi
+
+  # RealVNC (X11) service mode
+  systemctl_try_disable_now "vncserver-x11-serviced.service"
+  # WayVNC (Wayland) used on some newer images
+  systemctl_try_disable_now "wayvnc.service"
+}
+
+write_realvnc_config() {
+  local port="$1"
+  local cfg="/etc/vnc/config.d/vncserver-x11"
+
+  mkdir -p /etc/vnc/config.d
+
+  # Keep existing settings where possible, but ensure Authentication and RfbPort are set.
+  # RealVNC config format is "Key=Value" per line.
+  local tmp
+  tmp="$(mktemp)"
+
+  if [[ -f "$cfg" ]]; then
+    cp -f "$cfg" "$tmp"
+  else
+    : > "$tmp"
+  fi
+
+  # Drop any existing Authentication/RfbPort lines then append ours.
+  grep -v -E '^(Authentication|RfbPort)=' "$tmp" > "${tmp}.filtered" || true
+  mv -f "${tmp}.filtered" "$tmp"
+
+  cat >> "$tmp" <<EOF
+Authentication=VncAuth
+RfbPort=${port}
+EOF
+
+  install -m 644 "$tmp" "$cfg"
+  rm -f "$tmp"
+}
+
+read_vnc_password_plaintext() {
+  local __outvar="$1"
+  local p1=""
+  local p2=""
+
+  while true; do
+    read -r -p "VNC password (min 6 chars, plaintext): " p1 || true
+    if [[ -z "$p1" ]]; then
+      err "Password cannot be empty."
+      continue
+    fi
+    if [[ "${#p1}" -lt 6 ]]; then
+      err "Password must be at least 6 characters."
+      continue
+    fi
+
+    read -r -p "Confirm VNC password (plaintext): " p2 || true
+    if [[ "$p1" != "$p2" ]]; then
+      err "Passwords did not match. Try again."
+      continue
+    fi
+
+    # For compatibility with legacy VNC auth implementations, only the first 8
+    # characters may be significant. Truncate to 8 to avoid surprises.
+    if [[ "${#p1}" -gt 8 ]]; then
+      log "Note: truncating VNC password to first 8 characters for compatibility."
+      p1="${p1:0:8}"
+    fi
+
+    printf -v "${__outvar}" '%s' "$p1"
+    return 0
+  done
+}
+
+configure_vnc_if_requested() {
+  local enable_vnc="$1"
+  local port="$2"
+  local password="$3"
+
+  disable_screen_blanking
+
+  if [[ "${enable_vnc,,}" != "y" ]]; then
+    log "VNC not enabled (you chose no). Ensuring it is disabled..."
+    ensure_vnc_disabled
+    return 0
+  fi
+
+  if ! command -v raspi-config >/dev/null 2>&1; then
+    err "raspi-config not found; cannot enable VNC reliably on this image."
+    err "Install/enable VNC manually or ensure raspi-config is available."
+    exit 1
+  fi
+
+  log "Enabling VNC via raspi-config..."
+  raspi-config nonint do_vnc 0 || true
+
+  # Prefer configuring RealVNC if the tooling is present.
+  if command -v vncpasswd >/dev/null 2>&1; then
+    log "Configuring RealVNC (password auth and port)..."
+    write_realvnc_config "$port"
+
+    log "Setting VNC service-mode password..."
+    # vncpasswd -service prompts twice. Feed via stdin.
+    printf '%s\n%s\n' "$password" "$password" | vncpasswd -service >/dev/null 2>&1 || {
+      err "Failed to set VNC password with 'vncpasswd -service'."
+      err "If this image uses WayVNC instead of RealVNC, password setup differs."
+      exit 1
+    }
+
+    systemctl_try_restart "vncserver-x11-serviced.service"
+  else
+    err "vncpasswd not found; cannot set a dedicated VNC password."
+    err "This image may be using WayVNC, or RealVNC tooling is missing."
+    err "Either install the appropriate VNC server tooling, or use SystemAuth."
+    exit 1
+  fi
+
+  log "VNC enabled. Direct connections should use port ${port}."
 }
 
 copy_tree_clean() {
@@ -319,8 +456,25 @@ main() {
 
   ensure_user_exists "$pi_user"
 
+  local vnc_port=""
+  local vnc_password=""
+  if [[ "${enable_vnc,,}" == "y" ]]; then
+    prompt vnc_port "VNC port (direct TCP listen port)" "${VNC_PORT_DEFAULT}"
+    if [[ -z "$vnc_port" ]]; then
+      vnc_port="${VNC_PORT_DEFAULT}"
+    fi
+    if ! [[ "$vnc_port" =~ ^[0-9]+$ ]] || (( vnc_port < 1 || vnc_port > 65535 )); then
+      err "Invalid VNC port: ${vnc_port}"
+      exit 1
+    fi
+
+    read_vnc_password_plaintext vnc_password
+  fi
+
   system_update
-  enable_vnc_and_disable_blanking "$enable_vnc"
+
+  # VNC and screen blanking handling:
+  configure_vnc_if_requested "$enable_vnc" "${vnc_port:-$VNC_PORT_DEFAULT}" "${vnc_password:-}"
 
   sync_repo_to_workdir "$repo_dir" "$WORKDIR_DEFAULT"
 
