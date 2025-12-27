@@ -5,6 +5,9 @@ PI_USER_DEFAULT="iar"
 WORKDIR_DEFAULT="/opt/iar-display"
 TARGET_URL_DEFAULT="https://auth.iamresponding.com"
 VNC_PORT_DEFAULT="5900"
+LOGFILE_DEFAULT="/var/log/iar-provision.log"
+
+LOGFILE="${LOGFILE_DEFAULT}"
 
 log() { printf '%s\n' "[provision] $*"; }
 err() { printf '%s\n' "[provision][error] $*" >&2; }
@@ -15,6 +18,42 @@ require_root() {
     err "Example: sudo bash $0"
     exit 1
   fi
+}
+
+init_logging() {
+  mkdir -p "$(dirname "$LOGFILE")"
+  touch "$LOGFILE" || {
+    err "Could not write to log file: ${LOGFILE}"
+    exit 1
+  }
+  chmod 600 "$LOGFILE" || true
+  log "Logging command output to: ${LOGFILE}"
+}
+
+run_cmd() {
+  # Runs a command and captures all output to the logfile.
+  # Only formatted script messages go to the console.
+  {
+    printf '\n[%s] $ ' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '%q ' "$@"
+    printf '\n'
+  } >>"$LOGFILE"
+
+  if ! "$@" >>"$LOGFILE" 2>&1; then
+    err "Command failed: $*"
+    err "See log: ${LOGFILE}"
+    exit 1
+  fi
+}
+
+run_cmd_allow_fail() {
+  {
+    printf '\n[%s] $ ' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '%q ' "$@"
+    printf '\n'
+  } >>"$LOGFILE"
+
+  "$@" >>"$LOGFILE" 2>&1 || true
 }
 
 script_dir() {
@@ -45,6 +84,33 @@ prompt() {
   printf -v "${__var}" '%s' "${__val}"
 }
 
+prompt_secret_confirmed() {
+  # Masked input, requires confirmation. Stores in the variable name passed as $1.
+  local __var="$1"
+  local __msg="$2"
+  local p1=""
+  local p2=""
+
+  while true; do
+    read -r -s -p "${__msg}: " p1 || true
+    printf '\n'
+    if [[ -z "$p1" ]]; then
+      err "Value cannot be empty."
+      continue
+    fi
+
+    read -r -s -p "Confirm ${__msg}: " p2 || true
+    printf '\n'
+    if [[ "$p1" != "$p2" ]]; then
+      err "Values did not match. Try again."
+      continue
+    fi
+
+    printf -v "${__var}" '%s' "$p1"
+    return 0
+  done
+}
+
 ensure_user_exists() {
   local user="$1"
   if ! id -u "$user" >/dev/null 2>&1; then
@@ -66,7 +132,7 @@ system_update() {
   # No package installs. This matches the manual instruction "sudo apt update".
   if command -v apt-get >/dev/null 2>&1; then
     log "Running system update: apt-get update"
-    apt-get update -y || true
+    run_cmd_allow_fail apt-get update -y
   else
     log "apt-get not found, skipping system update."
   fi
@@ -126,17 +192,15 @@ maybe_install_splash() {
   fi
 
   log "Replacing boot splash image at ${dst_splash}..."
-  cp -f "$src" "$dst_splash"
+  run_cmd cp -f "$src" "$dst_splash"
 
   # FullPageOS uses /opt/custompios/background.png as the desktop background.
-  # Copy the same image there so the pre-kiosk desktop matches the boot splash.
   if [[ -d /opt/custompios ]]; then
     log "Replacing FullPageOS desktop background at /opt/custompios/background.png..."
-    cp -f "$src" /opt/custompios/background.png
+    run_cmd cp -f "$src" /opt/custompios/background.png
 
-    # Apply immediately if feh exists. Otherwise it will apply next time the OS sets it.
     if command -v feh >/dev/null 2>&1; then
-      feh --bg-center /opt/custompios/background.png >/dev/null 2>&1 || true
+      run_cmd_allow_fail feh --bg-center /opt/custompios/background.png
     fi
   else
     log "/opt/custompios not found, skipping desktop background replacement."
@@ -150,7 +214,7 @@ disable_screen_blanking() {
   fi
 
   log "Disabling screen blanking..."
-  raspi-config nonint do_blanking 1 || true
+  run_cmd_allow_fail raspi-config nonint do_blanking 1
 }
 
 systemctl_try_disable_now() {
@@ -158,7 +222,7 @@ systemctl_try_disable_now() {
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "${unit}"; then
       log "Disabling and stopping ${unit}..."
-      systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+      run_cmd_allow_fail systemctl disable --now "${unit}"
     fi
   fi
 }
@@ -168,23 +232,21 @@ systemctl_try_restart() {
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "${unit}"; then
       log "Restarting ${unit}..."
-      systemctl restart "${unit}" >/dev/null 2>&1 || true
+      run_cmd_allow_fail systemctl restart "${unit}"
     fi
   fi
 }
 
 ensure_vnc_disabled() {
-  # Best-effort disable across Pi OS variants (RealVNC or WayVNC).
+  # Best-effort disable across Pi OS variants.
   if command -v raspi-config >/dev/null 2>&1; then
     log "Disabling VNC via raspi-config (best effort)..."
-    raspi-config nonint do_vnc 1 >/dev/null 2>&1 || true
+    run_cmd_allow_fail raspi-config nonint do_vnc 1
   else
     log "raspi-config not found, cannot toggle VNC via raspi-config."
   fi
 
-  # RealVNC (X11) service mode
   systemctl_try_disable_now "vncserver-x11-serviced.service"
-  # WayVNC (Wayland) used on some newer images
   systemctl_try_disable_now "wayvnc.service"
 }
 
@@ -194,8 +256,6 @@ write_realvnc_config() {
 
   mkdir -p /etc/vnc/config.d
 
-  # Keep existing settings where possible, but ensure Authentication and RfbPort are set.
-  # RealVNC config format is "Key=Value" per line.
   local tmp
   tmp="$(mktemp)"
 
@@ -205,7 +265,6 @@ write_realvnc_config() {
     : > "$tmp"
   fi
 
-  # Drop any existing Authentication/RfbPort lines then append ours.
   grep -v -E '^(Authentication|RfbPort)=' "$tmp" > "${tmp}.filtered" || true
   mv -f "${tmp}.filtered" "$tmp"
 
@@ -218,41 +277,7 @@ EOF
   rm -f "$tmp"
 }
 
-read_vnc_password_plaintext() {
-  local __outvar="$1"
-  local p1=""
-  local p2=""
-
-  while true; do
-    read -r -p "VNC password (min 6 chars, plaintext): " p1 || true
-    if [[ -z "$p1" ]]; then
-      err "Password cannot be empty."
-      continue
-    fi
-    if [[ "${#p1}" -lt 6 ]]; then
-      err "Password must be at least 6 characters."
-      continue
-    fi
-
-    read -r -p "Confirm VNC password (plaintext): " p2 || true
-    if [[ "$p1" != "$p2" ]]; then
-      err "Passwords did not match. Try again."
-      continue
-    fi
-
-    # For compatibility with legacy VNC auth implementations, only the first 8
-    # characters may be significant. Truncate to 8 to avoid surprises.
-    if [[ "${#p1}" -gt 8 ]]; then
-      log "Note: truncating VNC password to first 8 characters for compatibility."
-      p1="${p1:0:8}"
-    fi
-
-    printf -v "${__outvar}" '%s' "$p1"
-    return 0
-  done
-}
-
-configure_vnc_if_requested() {
+configure_vnc_step() {
   local enable_vnc="$1"
   local port="$2"
   local password="$3"
@@ -260,7 +285,7 @@ configure_vnc_if_requested() {
   disable_screen_blanking
 
   if [[ "${enable_vnc,,}" != "y" ]]; then
-    log "VNC not enabled (you chose no). Ensuring it is disabled..."
+    log "VNC not enabled. Ensuring it is disabled..."
     ensure_vnc_disabled
     return 0
   fi
@@ -272,26 +297,22 @@ configure_vnc_if_requested() {
   fi
 
   log "Enabling VNC via raspi-config..."
-  raspi-config nonint do_vnc 0 || true
+  run_cmd_allow_fail raspi-config nonint do_vnc 0
 
-  # Prefer configuring RealVNC if the tooling is present.
   if command -v vncpasswd >/dev/null 2>&1; then
-    log "Configuring RealVNC (password auth and port)..."
+    log "Configuring RealVNC settings (port and password auth)..."
     write_realvnc_config "$port"
 
     log "Setting VNC service-mode password..."
-    # vncpasswd -service prompts twice. Feed via stdin.
-    printf '%s\n%s\n' "$password" "$password" | vncpasswd -service >/dev/null 2>&1 || {
-      err "Failed to set VNC password with 'vncpasswd -service'."
-      err "If this image uses WayVNC instead of RealVNC, password setup differs."
-      exit 1
-    }
+    {
+      printf '%s\n' "$password"
+      printf '%s\n' "$password"
+    } | run_cmd vncpasswd -service
 
     systemctl_try_restart "vncserver-x11-serviced.service"
   else
     err "vncpasswd not found; cannot set a dedicated VNC password."
-    err "This image may be using WayVNC, or RealVNC tooling is missing."
-    err "Either install the appropriate VNC server tooling, or use SystemAuth."
+    err "This image may not have RealVNC tooling installed."
     exit 1
   fi
 
@@ -299,7 +320,6 @@ configure_vnc_if_requested() {
 }
 
 copy_tree_clean() {
-  # Remove destination and copy source tree without additional dependencies.
   local src="$1"
   local dst="$2"
 
@@ -335,8 +355,6 @@ install_extension() {
 }
 
 json_escape_minimal() {
-  # Minimal JSON escape for backslash and double quotes.
-  # Does not handle newlines or other control chars.
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
@@ -352,14 +370,11 @@ create_credentials() {
     exit 1
   fi
 
-  log "Credentials are case sensitive: agency, username, and password."
-
   local agency iar_user iar_pass
+  log "IaR credentials are case sensitive."
   prompt agency "IaR agency (case sensitive)" ""
   prompt iar_user "IaR username (case sensitive)" ""
-  prompt iar_pass "IaR password (case sensitive)" ""
-
-  cp -f "$template" "$creds"
+  prompt_secret_confirmed iar_pass "IaR password"
 
   local a u p
   a="$(json_escape_minimal "$agency")"
@@ -380,8 +395,6 @@ EOF
 }
 
 install_chromium_wrapper() {
-  # Wrapping chromium is more reliable than patching FullPageOS scripts because
-  # the chromium command may be constructed dynamically.
   local pi_user="$1"
   local ext_dir="/home/${pi_user}/extension"
 
@@ -404,7 +417,7 @@ install_chromium_wrapper() {
       log "Backup already exists: ${backup}"
     else
       log "Backing up ${t} -> ${backup}"
-      mv "$t" "$backup"
+      run_cmd mv "$t" "$backup"
     fi
 
     log "Installing wrapper at ${t}"
@@ -437,6 +450,7 @@ EOF
 
 main() {
   require_root
+  init_logging
 
   local repo_dir
   repo_dir="$(repo_root_from_script)"
@@ -449,33 +463,15 @@ main() {
 
   log "Using local repo at: ${repo_dir}"
 
-  local pi_user enable_vnc target_url
+  # Step 1: Basic IaR install choices
+  local pi_user target_url
   prompt pi_user "Pi user (owner of /home/<user>/extension)" "${PI_USER_DEFAULT}"
-  prompt enable_vnc "Enable VNC? (y/n)" "y"
   prompt target_url "iamresponding URL" "${TARGET_URL_DEFAULT}"
-
   ensure_user_exists "$pi_user"
 
-  local vnc_port=""
-  local vnc_password=""
-  if [[ "${enable_vnc,,}" == "y" ]]; then
-    prompt vnc_port "VNC port (direct TCP listen port)" "${VNC_PORT_DEFAULT}"
-    if [[ -z "$vnc_port" ]]; then
-      vnc_port="${VNC_PORT_DEFAULT}"
-    fi
-    if ! [[ "$vnc_port" =~ ^[0-9]+$ ]] || (( vnc_port < 1 || vnc_port > 65535 )); then
-      err "Invalid VNC port: ${vnc_port}"
-      exit 1
-    fi
-
-    read_vnc_password_plaintext vnc_password
-  fi
-
+  # Step 2: IaR setup
+  log "Step: IaR setup"
   system_update
-
-  # VNC and screen blanking handling:
-  configure_vnc_if_requested "$enable_vnc" "${vnc_port:-$VNC_PORT_DEFAULT}" "${vnc_password:-}"
-
   sync_repo_to_workdir "$repo_dir" "$WORKDIR_DEFAULT"
 
   set_fullpageos_url "$target_url"
@@ -489,8 +485,33 @@ main() {
     err "Auto-load setup failed. You may need to load the extension manually once."
   fi
 
+  # Step 3: VNC setup
+  log "Step: Remote access (VNC)"
+  local enable_vnc
+  prompt enable_vnc "Enable VNC? (y/n)" "y"
+
+  local vnc_port=""
+  local vnc_password=""
+
+  if [[ "${enable_vnc,,}" == "y" ]]; then
+    prompt vnc_port "VNC port (direct TCP listen port)" "${VNC_PORT_DEFAULT}"
+    vnc_port="${vnc_port:-$VNC_PORT_DEFAULT}"
+    if ! [[ "$vnc_port" =~ ^[0-9]+$ ]] || (( vnc_port < 1 || vnc_port > 65535 )); then
+      err "Invalid VNC port: ${vnc_port}"
+      exit 1
+    fi
+
+    prompt_secret_confirmed vnc_password "VNC password (min 6 chars)"
+    if [[ "${#vnc_password}" -lt 6 ]]; then
+      err "VNC password must be at least 6 characters."
+      exit 1
+    fi
+  fi
+
+  configure_vnc_step "$enable_vnc" "${vnc_port:-$VNC_PORT_DEFAULT}" "${vnc_password:-}"
+
   log "Provisioning complete. Rebooting now..."
-  reboot
+  run_cmd reboot
 }
 
 main "$@"
